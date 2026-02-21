@@ -10,13 +10,11 @@ const fs = require("fs");
 
 const app = express();
 
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// ─── Servir imágenes subidas ─────────────────────────────────────
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// ─── Conexión DB ──────────────────────────────────────────────────
 const pool = new Pool({
   user: process.env.DB_USER || "postgres",
   host: process.env.DB_HOST || "localhost",
@@ -25,7 +23,6 @@ const pool = new Pool({
   port: process.env.DB_PORT || 5432,
 });
 
-// ─── Multer (subida de imágenes) ──────────────────────────────────
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = path.join(__dirname, "uploads");
@@ -39,7 +36,6 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// ─── Middleware auth ──────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || "fotovega_secret_dev";
 
 function authMiddleware(req, res, next) {
@@ -53,16 +49,10 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ══════════════════════════════════════════════════════════════════
-// RUTAS PÚBLICAS
-// ══════════════════════════════════════════════════════════════════
-
-// Health check
 app.get("/", (req, res) => {
   res.json({ message: "Backend Fotovega funcionando 🚀" });
 });
 
-// ─── Contacto ────────────────────────────────────────────────────
 app.post("/api/contacto", async (req, res) => {
   const { nombre, email, mensaje } = req.body;
   try {
@@ -76,7 +66,6 @@ app.post("/api/contacto", async (req, res) => {
   }
 });
 
-// ─── Eventos públicos ─────────────────────────────────────────────
 app.get("/api/eventos", async (req, res) => {
   try {
     const result = await pool.query(
@@ -96,19 +85,16 @@ app.get("/api/eventos/:id", async (req, res) => {
     );
     if (evento.rows.length === 0)
       return res.status(404).json({ error: "Evento no encontrado" });
-
     const fotos = await pool.query(
       "SELECT * FROM fotos WHERE evento_id = $1 AND activo = true ORDER BY created_at ASC",
       [req.params.id]
     );
-
     res.json({ evento: evento.rows[0], fotos: fotos.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Fotos individuales ───────────────────────────────────────────
 app.get("/api/fotos/:id", async (req, res) => {
   try {
     const result = await pool.query(
@@ -123,48 +109,27 @@ app.get("/api/fotos/:id", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════════
-// CARRITO Y ÓRDENES
-// ══════════════════════════════════════════════════════════════════
-
-// Crear orden (checkout)
 app.post("/api/ordenes", async (req, res) => {
   const { email, nombre, items } = req.body;
-  // items = [{ foto_id, precio }, ...]
-
   if (!items || items.length === 0)
     return res.status(400).json({ error: "Carrito vacío" });
-
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-
     const total = items.reduce((sum, item) => sum + parseFloat(item.precio), 0);
-
     const ordenResult = await client.query(
       "INSERT INTO ordenes (email_comprador, nombre_comprador, total, estado) VALUES ($1, $2, $3, 'pendiente') RETURNING *",
       [email, nombre, total]
     );
     const orden = ordenResult.rows[0];
-
     for (const item of items) {
       await client.query(
         "INSERT INTO orden_items (orden_id, foto_id, precio_unitario) VALUES ($1, $2, $3)",
         [orden.id, item.foto_id, item.precio]
       );
     }
-
     await client.query("COMMIT");
-
-    // ── MODO TEST: simular pago aprobado directamente ──────────────
-    // Cuando integres MercadoPago real, acá va el preference_id
-    res.json({
-      ok: true,
-      orden_id: orden.id,
-      total,
-      // En test simulamos que el pago se aprueba solo
-      checkout_url: `http://localhost:5173/orden-confirmada/${orden.id}`,
-    });
+    res.json({ ok: true, orden_id: orden.id, total });
   } catch (err) {
     await client.query("ROLLBACK");
     res.status(500).json({ error: err.message });
@@ -173,29 +138,20 @@ app.post("/api/ordenes", async (req, res) => {
   }
 });
 
-// Confirmar pago (modo test: lo marcamos como pagado)
 app.post("/api/ordenes/:id/confirmar", async (req, res) => {
   try {
-    await pool.query(
-      "UPDATE ordenes SET estado = 'pagado' WHERE id = $1",
-      [req.params.id]
-    );
+    await pool.query("UPDATE ordenes SET estado = 'pagado' WHERE id = $1", [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Obtener orden con sus fotos (para la página de descarga)
 app.get("/api/ordenes/:id", async (req, res) => {
   try {
-    const orden = await pool.query(
-      "SELECT * FROM ordenes WHERE id = $1",
-      [req.params.id]
-    );
+    const orden = await pool.query("SELECT * FROM ordenes WHERE id = $1", [req.params.id]);
     if (orden.rows.length === 0)
       return res.status(404).json({ error: "Orden no encontrada" });
-
     const items = await pool.query(
       `SELECT oi.*, f.url, f.url_alta, f.descripcion, e.nombre as evento_nombre
        FROM orden_items oi
@@ -204,42 +160,29 @@ app.get("/api/ordenes/:id", async (req, res) => {
        WHERE oi.orden_id = $1`,
       [req.params.id]
     );
-
     res.json({ orden: orden.rows[0], items: items.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ══════════════════════════════════════════════════════════════════
-// ADMIN — Login
-// ══════════════════════════════════════════════════════════════════
-
 app.post("/api/admin/login", async (req, res) => {
   const { email, password } = req.body;
   try {
-    const result = await pool.query(
-      "SELECT * FROM admins WHERE email = $1",
-      [email]
-    );
+    const result = await pool.query("SELECT * FROM admins WHERE email = $1", [email]);
     if (result.rows.length === 0)
       return res.status(401).json({ error: "Credenciales inválidas" });
-
     const admin = result.rows[0];
     const match = await bcrypt.compare(password, admin.password_hash);
-    if (!match)
-      return res.status(401).json({ error: "Credenciales inválidas" });
-
-    const token = jwt.sign({ id: admin.id, email: admin.email }, JWT_SECRET, {
-      expiresIn: "7d",
-    });
+    if (!match) return res.status(401).json({ error: "Credenciales inválidas" });
+    const token = jwt.sign({ id: admin.id, email: admin.email }, JWT_SECRET, { expiresIn: "7d" });
     res.json({ ok: true, token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Registrar primer admin (solo usar una vez, luego comentar o borrar)
+// ⚠️ Usar solo una vez para crear el primer admin
 app.post("/api/admin/setup", async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -254,11 +197,6 @@ app.post("/api/admin/setup", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════════
-// ADMIN — Gestión de eventos y fotos (protegidas con JWT)
-// ══════════════════════════════════════════════════════════════════
-
-// Ver todos los eventos (incluyendo inactivos)
 app.get("/api/admin/eventos", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -270,7 +208,6 @@ app.get("/api/admin/eventos", authMiddleware, async (req, res) => {
   }
 });
 
-// Crear evento
 app.post("/api/admin/eventos", authMiddleware, upload.single("imagen"), async (req, res) => {
   const { nombre, descripcion, fecha, lugar } = req.body;
   const imagen_portada = req.file ? `/uploads/${req.file.filename}` : null;
@@ -285,7 +222,6 @@ app.post("/api/admin/eventos", authMiddleware, upload.single("imagen"), async (r
   }
 });
 
-// Editar evento
 app.put("/api/admin/eventos/:id", authMiddleware, upload.single("imagen"), async (req, res) => {
   const { nombre, descripcion, fecha, lugar, activo } = req.body;
   try {
@@ -305,7 +241,6 @@ app.put("/api/admin/eventos/:id", authMiddleware, upload.single("imagen"), async
   }
 });
 
-// Eliminar evento
 app.delete("/api/admin/eventos/:id", authMiddleware, async (req, res) => {
   try {
     await pool.query("DELETE FROM eventos WHERE id = $1", [req.params.id]);
@@ -315,13 +250,10 @@ app.delete("/api/admin/eventos/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// ─── Fotos del admin ──────────────────────────────────────────────
-
-// Subir foto a un evento
+// Subir foto como archivo
 app.post("/api/admin/fotos", authMiddleware, upload.single("foto"), async (req, res) => {
   const { evento_id, precio, descripcion } = req.body;
   if (!req.file) return res.status(400).json({ error: "No se recibió imagen" });
-
   const url = `/uploads/${req.file.filename}`;
   try {
     const result = await pool.query(
@@ -334,7 +266,21 @@ app.post("/api/admin/fotos", authMiddleware, upload.single("foto"), async (req, 
   }
 });
 
-// Ver fotos de un evento (admin)
+// Subir foto por URL externa
+app.post("/api/admin/fotos/url", authMiddleware, async (req, res) => {
+  const { evento_id, precio, descripcion, url } = req.body;
+  if (!url) return res.status(400).json({ error: "No se recibió URL" });
+  try {
+    const result = await pool.query(
+      "INSERT INTO fotos (evento_id, url, url_alta, precio, descripcion) VALUES ($1, $2, $2, $3, $4) RETURNING *",
+      [evento_id, url, precio || 2000, descripcion]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/admin/eventos/:id/fotos", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -347,7 +293,6 @@ app.get("/api/admin/eventos/:id/fotos", authMiddleware, async (req, res) => {
   }
 });
 
-// Eliminar foto
 app.delete("/api/admin/fotos/:id", authMiddleware, async (req, res) => {
   try {
     await pool.query("DELETE FROM fotos WHERE id = $1", [req.params.id]);
@@ -357,31 +302,24 @@ app.delete("/api/admin/fotos/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// Ver todas las órdenes (admin)
 app.get("/api/admin/ordenes", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      "SELECT * FROM ordenes ORDER BY created_at DESC"
-    );
+    const result = await pool.query("SELECT * FROM ordenes ORDER BY created_at DESC");
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ver los formularios
-
 app.get("/api/admin/contactos", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      "SELECT * FROM contacts ORDER BY created_at DESC"
-    )
-    res.json(result.rows)
+    const result = await pool.query("SELECT * FROM contacts ORDER BY created_at DESC");
+    res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: err.message });
   }
-})
-// ══════════════════════════════════════════════════════════════════
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Servidor Fotovega corriendo en puerto ${PORT} 🚀`);
